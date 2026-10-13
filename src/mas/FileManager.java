@@ -58,7 +58,19 @@ public class FileManager {
                 }
             });
         } else {
-            Vars.platform.showFileChooser(open, title, extension, f -> {cons.get(f.absolutePath());});
+            Cons<Fi> fileCons = f -> cons.get(f.absolutePath());
+            try {
+                // The overload with a title does not exist in every game version
+                Vars.platform.showFileChooser(open, extension, fileCons);
+            } catch (NoSuchMethodError e) {
+                try {
+                    Vars.platform.getClass()
+                            .getMethod("showFileChooser", boolean.class, String.class, String.class, Cons.class)
+                            .invoke(Vars.platform, open, title, extension, fileCons);
+                } catch (ReflectiveOperationException ex) {
+                    throw new RuntimeException("No compatible file chooser found in this game version.", ex);
+                }
+            }
         }
     }
 }

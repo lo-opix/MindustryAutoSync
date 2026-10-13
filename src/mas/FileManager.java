@@ -60,17 +60,38 @@ public class FileManager {
         } else {
             Cons<Fi> fileCons = f -> cons.get(f.absolutePath());
             try {
-                // The overload with a title does not exist in every game version
-                Vars.platform.showFileChooser(open, extension, fileCons);
-            } catch (NoSuchMethodError e) {
-                try {
-                    Vars.platform.getClass()
-                            .getMethod("showFileChooser", boolean.class, String.class, String.class, Cons.class)
-                            .invoke(Vars.platform, open, title, extension, fileCons);
-                } catch (ReflectiveOperationException ex) {
-                    throw new RuntimeException("No compatible file chooser found in this game version.", ex);
+                if (!showNewFileChooser(open, title, extensions, fileCons)) {
+                    showLegacyFileChooser(open, title, extension, fileCons);
                 }
+            } catch (ReflectiveOperationException ex) {
+                throw new RuntimeException("No compatible file chooser found in this game version.", ex);
             }
+        }
+    }
+
+    /** File chooser API of recent game versions (Platform.showFileChooser(FileChooserParams)). */
+    private static boolean showNewFileChooser(boolean open, String title, String[] extensions, Cons<Fi> cons) throws ReflectiveOperationException {
+        Class<?> paramsClass;
+        try {
+            paramsClass = Class.forName("mindustry.ui.FileChooser$FileChooserParams");
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+        Object params = paramsClass.getConstructor().newInstance();
+        paramsClass.getField("open").set(params, open);
+        paramsClass.getField("title").set(params, title);
+        paramsClass.getField("extensions").set(params, extensions);
+        paramsClass.getField("handler").set(params, cons);
+        Vars.platform.getClass().getMethod("showFileChooser", paramsClass).invoke(Vars.platform, params);
+        return true;
+    }
+
+    /** File chooser API of older game versions. */
+    private static void showLegacyFileChooser(boolean open, String title, String extension, Cons<Fi> cons) throws ReflectiveOperationException {
+        try {
+            Vars.platform.showFileChooser(open, title, extension, cons);
+        } catch (NoSuchMethodError e) {
+            Vars.platform.showFileChooser(open, extension, cons);
         }
     }
 }

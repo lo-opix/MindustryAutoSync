@@ -1,17 +1,14 @@
 package mas;
 
 import arc.Core;
-import arc.Files;
 import arc.files.Fi;
 import arc.files.ZipFi;
 import arc.struct.Seq;
-import arc.util.ArcRuntimeException;
 import arc.util.Log;
-import arc.util.Nullable;
 import arc.util.io.Streams;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -56,38 +53,17 @@ public class ExportManager {
      * Checks if MAS export is currently enabled.
      */
     public boolean isExportEnabled() {
-        return Core.settings.getBool("mas-enable-export") && !getSyncLocation().isEmpty();
+        return Core.settings.getBool("mas-enable-export") && drive.isConfigured();
     }
 
     /**
      * Checks if MAS import is currently enabled.
      */
     public boolean isImportEnabled() {
-        return Core.settings.getBool("mas-enable-import") && !getSyncLocation().isEmpty();
+        return Core.settings.getBool("mas-enable-import") && drive.isConfigured();
     }
 
-    /**
-     * Gets the current path / URI to the sync file.
-     */
-    public String getSyncLocation() {
-        return Core.settings.getString("mas-export-location");
-    }
-
-    /**
-     * Gets an Arc Fi for the currently set up file.
-     * Returns null if permissions are not sufficient to access the file.
-     */
-    @Nullable
-    public Fi getSyncFile() {
-        if (android) {
-            return new AndroidContentFi(getSyncLocation());
-        } else {
-            return Core.files.get(
-                    getSyncLocation(),
-                    Files.FileType.absolute
-            );
-        }
-    }
+    public final DriveClient drive = new DriveClient();
 
     public ExportManager() {}
 
@@ -112,14 +88,10 @@ public class ExportManager {
      * The main difference with Mindustry's implementation of this function is setting backup (avoid changing device
      * settings such as scaling) and last sync check.
      * Also checks that MAS is currently enabled.
-     * @param file The file to import from.
-     * @return True if import was successful, or no import is required, false if import failed in some way.
-     * @throws IllegalArgumentException When the provided file is not valid.
+     * @param zip The content of the MAS export.
+     * @throws IllegalArgumentException When the provided data is not valid.
      */
-    public boolean importData(Fi file) throws IllegalArgumentException {
-        if (!isImportEnabled()) {
-            return true;
-        }
+    public void importData(byte[] zip) throws IllegalArgumentException {
         //filter and save the current settings (graphical, keybinds...) and keep the non-gameplay related ones
         Seq<Setting> settings_backup = new Seq<>();
         for (String setting : Core.settings.keys()) {
@@ -131,11 +103,7 @@ public class ExportManager {
 
         Fi dest = Core.files.local("zipdata.zip");
         if (dest.exists()) dest.delete();
-        try {
-            file.copyTo(dest);
-        } catch (ArcRuntimeException e) { // We probably cannot access the original file
-            return false;
-        }
+        dest.writeBytes(zip);
         Fi zipped = new ZipFi(dest);
 
         Fi base = Core.settings.getDataDirectory();
@@ -156,7 +124,7 @@ public class ExportManager {
         if (lastSynced <= getLastSynced()) {
             Log.info("MAS export is up to date, not importing.");
             dest.delete();
-            return true;
+            return;
         }
 
         //delete old saves so they don't interfere
@@ -190,24 +158,35 @@ public class ExportManager {
 
         setLastSynced(lastSynced);
         Log.info("MAS export was older, save imported.");
-
-        return true;
-    }
-
-    public boolean importData() throws IllegalArgumentException {
-        return importData(getSyncFile());
     }
 
     /**
-     * Exports Mindustry data to an MAS sync file.
-     * The main difference with Mindustry implementation of this function is the inclusion of the last synced file.
-     * Doesn't check that MAS is currently enabled.
-     * @param file The file to export to.
-     * @throws IOException When the file cannot be written to.
-     * @throws SecurityException On Android if the app doesn't have a persistent URI access to the resource.
+     * Downloads the save from Google Drive and imports it if it is newer than the local one.
+     * Does nothing if import is disabled.
+     * @return True if a save was imported.
+     * @throws IOException When Google Drive cannot be reached.
+     * @throws IllegalArgumentException When the remote save is not valid.
      */
-    public void exportData(Fi file) throws IOException, SecurityException {
-        if (!isExportEnabled()) return;
+    public boolean importFromDrive() throws IOException, IllegalArgumentException {
+        if (!isImportEnabled()) return false;
+        // Only check the metadata first, to avoid downloading the whole save when it didn't change
+        if (drive.fetch(false).lastSynced <= getLastSynced()) {
+            Log.info("MAS: Google Drive save is up to date, not importing.");
+            return false;
+        }
+        DriveClient.RemoteSave save = drive.fetch(true);
+        if (!save.exists) return false;
+        importData(save.data);
+        return true;
+    }
+
+    /**
+     * Exports Mindustry data to an MAS zip.
+     * The main difference with Mindustry implementation of this function is the inclusion of the last synced file.
+     * @return The content of the zip.
+     * @throws IOException When a file cannot be read.
+     */
+    public byte[] exportData() throws IOException {
         setLastSynced(System.currentTimeMillis());
         Seq<Fi> files = new Seq<>();
         files.add(Core.settings.getSettingsFile());
@@ -228,7 +207,8 @@ public class ExportManager {
             }
         }
 
-        try(OutputStream fos = file.write(false, 2048); ZipOutputStream zos = new ZipOutputStream(fos)){
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try(ZipOutputStream zos = new ZipOutputStream(bytes)){
             for(Fi add : files){
                 String path = add.path().substring(base.length());
                 if(add.isDirectory()) path += "/";
@@ -243,9 +223,18 @@ public class ExportManager {
                 zos.closeEntry();
             }
         }
+        return bytes.toByteArray();
     }
 
-    public void exportData() throws IOException {
-        exportData(getSyncFile());
+    /**
+     * Exports the save and uploads it to Google Drive.
+     * Does nothing if export is disabled.
+     * @throws IOException When Google Drive cannot be reached.
+     */
+    public void exportToDrive() throws IOException {
+        if (!isExportEnabled()) return;
+        byte[] zip = exportData();
+        drive.upload(zip, getLastSynced());
+        Log.info("MAS: save uploaded to Google Drive (@ bytes).", zip.length);
     }
 }

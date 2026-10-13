@@ -3,7 +3,7 @@
  *
  * Deploy this script as a web app (Execute as: Me, Who has access: Anyone),
  * then paste the deployment URL and your Drive folder link in the mod settings.
- * See drive-script/README.md for the full setup.
+ * See the "Setting up Google Drive" section of README.md for the full setup.
  */
 
 // Optional: set a password here and type the same one in the mod settings.

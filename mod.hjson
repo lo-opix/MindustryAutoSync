@@ -14,7 +14,7 @@ main: "mas.MindustryAutomaticSync"
 description: "Automatically export and import your save."
 
 #the mod version
-version: 0.1
+version: 0.2
 
 #the minimum game build required to run this mod
 minGameVersion: 154

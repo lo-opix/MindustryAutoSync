@@ -19,6 +19,7 @@ import static mindustry.Vars.*;
 
 public class ExportManager {
     public static final String lastSyncedFilename = "mas_last_synced.txt";
+    public static final String pendingImportFilename = "mas_pending_import.zip";
 
     /**
      * Returns the date of the last recorded save sync.
@@ -53,7 +54,8 @@ public class ExportManager {
      * Checks if MAS export is currently enabled.
      */
     public boolean isExportEnabled() {
-        return Core.settings.getBool("mas-enable-export") && drive.isConfigured();
+        // A downloaded save waiting for a restart must not be overwritten by the outdated local one
+        return Core.settings.getBool("mas-enable-export") && drive.isConfigured() && !hasPendingImport();
     }
 
     /**
@@ -161,22 +163,52 @@ public class ExportManager {
     }
 
     /**
-     * Downloads the save from Google Drive and imports it if it is newer than the local one.
-     * Does nothing if import is disabled.
-     * @return True if a save was imported.
-     * @throws IOException When Google Drive cannot be reached.
-     * @throws IllegalArgumentException When the remote save is not valid.
+     * The save downloaded from Google Drive, applied at the next game start.
      */
-    public boolean importFromDrive() throws IOException, IllegalArgumentException {
+    public Fi getPendingImport() {
+        return Core.settings.getDataDirectory().child(pendingImportFilename);
+    }
+
+    public boolean hasPendingImport() {
+        return getPendingImport().exists();
+    }
+
+    /**
+     * Imports the save downloaded at the previous game start, if any.
+     * Must be called before the game loads its data.
+     * @return True if a save was imported.
+     * @throws IllegalArgumentException When the downloaded save is not valid.
+     */
+    public boolean applyPendingImport() throws IllegalArgumentException {
+        Fi pending = getPendingImport();
+        if (!pending.exists()) return false;
+        try {
+            long before = getLastSynced();
+            importData(pending.readBytes());
+            return getLastSynced() != before;
+        } finally {
+            pending.delete();
+        }
+    }
+
+    /**
+     * Downloads the save from Google Drive if it is newer than the local one.
+     * It is stored to be imported at the next game start, as the game data is already loaded.
+     * Does nothing if import is disabled.
+     * @return True if a newer save was downloaded.
+     * @throws IOException When Google Drive cannot be reached.
+     */
+    public boolean downloadFromDrive() throws IOException {
         if (!isImportEnabled()) return false;
         // Only check the metadata first, to avoid downloading the whole save when it didn't change
         if (drive.fetch(false).lastSynced <= getLastSynced()) {
-            Log.info("MAS: Google Drive save is up to date, not importing.");
+            Log.info("MAS: Google Drive save is up to date.");
             return false;
         }
         DriveClient.RemoteSave save = drive.fetch(true);
         if (!save.exists) return false;
-        importData(save.data);
+        getPendingImport().writeBytes(save.data);
+        Log.info("MAS: newer save downloaded from Google Drive, it will be imported at the next start.");
         return true;
     }
 
@@ -224,17 +256,5 @@ public class ExportManager {
             }
         }
         return bytes.toByteArray();
-    }
-
-    /**
-     * Exports the save and uploads it to Google Drive.
-     * Does nothing if export is disabled.
-     * @throws IOException When Google Drive cannot be reached.
-     */
-    public void exportToDrive() throws IOException {
-        if (!isExportEnabled()) return;
-        byte[] zip = exportData();
-        drive.upload(zip, getLastSynced());
-        Log.info("MAS: save uploaded to Google Drive (@ bytes).", zip.length);
     }
 }

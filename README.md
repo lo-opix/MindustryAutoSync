@@ -6,13 +6,21 @@
 
 Mindustry Auto Sync (MAS for short) is a Java mod that synchronizes your save with a Google Drive folder.
 
-When the game starts, the mod downloads the save from Google Drive and, if it is newer, loads it seamlessly.
-Every time the game saves, and when it closes, the save is uploaded to Google Drive.
+When the game starts, the mod checks Google Drive. If a newer save is found, it is downloaded and the game asks you to restart to use it.
+When you leave a game, the save is uploaded to Google Drive. A popup in the bottom right corner shows the progress.
+If you quit the game during the upload, the game waits for it to finish before closing.
 If there is no internet connection, a warning is shown and the local save is used.
+
+The mod updates itself from the latest GitHub release when the game starts (it can be disabled in the settings).
 
 The mod works on desktop and Android.
 
 iOS devices cannot be supported. It's not possible to load Java mods on iOS.
+
+## Installing
+
+In Mindustry, go to **Mods > Import mod > Import from GitHub** and type `lo-opix/MindustryAutoSync`.
+You can also download `dexed-MindustryAutoSync.jar` from the [releases](https://github.com/lo-opix/MindustryAutoSync/releases) (it works on desktop and Android).
 
 ## Setting up Google Drive
 
@@ -33,8 +41,8 @@ Anyone who knows the script URL (and the password) can read and replace your sav
 
 - **Make a backup of your save - things will go wrong.**
 - On device 1, set up the mod as explained above, and enable upload and download.
-- Save or quit the game, and check that `mindustry-sync.zip` appears in the Drive folder.
-- On device 2, install the mod and set it up the same way, then restart the game: the save gets downloaded.
+- Play, go back to the main menu, and check that `mindustry-sync.zip` appears in the Drive folder.
+- On device 2, install the mod and set it up the same way, then restart the game: the save gets downloaded, and is used after another restart.
 
 Regularly make offline backup of your save. Issue will happen, and you don't want to lose your progress.
 

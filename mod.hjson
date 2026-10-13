@@ -4,6 +4,9 @@ displayName: "Auto Sync"
 #the internal name of your mod
 name: "mas"
 
+#the GitHub repository, used for updates
+repo: "lo-opix/MindustryAutoSync"
+
 #your name
 author: "ascpial"
 

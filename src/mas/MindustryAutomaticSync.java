@@ -7,6 +7,7 @@ import arc.util.Log;
 import arc.util.Threads;
 import arc.util.Timer;
 import mindustry.Vars;
+import mindustry.core.GameState;
 import mindustry.game.EventType;
 import mindustry.mod.Mod;
 import mindustry.ui.dialogs.SettingsMenuDialog;
@@ -16,15 +17,17 @@ import java.net.ConnectException;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static mindustry.Vars.ui;
 
 public class MindustryAutomaticSync extends Mod {
+    private static final long MAX_UPLOAD_WAIT = 5 * 60 * 1000;
+
     private final ExportManager em;
-    private final AtomicBoolean uploading = new AtomicBoolean(false);
-    // Avoids showing the same warning on every autosave
-    private boolean uploadWarningShown;
+    private SyncPopup popup;
+    private volatile Thread uploadThread;
+    // True when the save changed since the last successful upload
+    private volatile boolean dirty;
 
     // Message shown when game has finalized starting. Built lazily, as the mod bundle isn't loaded yet.
     private Prov<String> message;
@@ -35,67 +38,131 @@ public class MindustryAutomaticSync extends Mod {
         Core.settings.defaults("mas-secret", "");
         Core.settings.defaults("mas-enable-export", false);
         Core.settings.defaults("mas-enable-import", false);
+        Core.settings.defaults("mas-auto-update", true);
 
         em = new ExportManager();
-        // The save must be imported before the game loads it, so this blocks the startup until Drive answers
+        // The save downloaded at the previous start must be imported before the game loads its data
         try {
-            if (em.importFromDrive()) message = () -> Core.bundle.get("mas-successful-import");
-        } catch (IOException e) {
-            Log.err("MAS: unable to download the save from Google Drive", e);
-            message = () -> describe(e) + "\n" + Core.bundle.get("mas-offline-import");
+            if (em.applyPendingImport()) message = () -> Core.bundle.get("mas-successful-import");
         } catch (IllegalArgumentException e) {
-            Log.err("MAS: invalid save on Google Drive", e);
+            Log.err("MAS: invalid save downloaded from Google Drive", e);
             message = () -> Core.bundle.get("mas-invalid-import") + "\n" + e.getMessage();
         }
 
-        Events.on(EventType.SaveLoadEvent.class, e -> {
-            // TODO: This is very ugly, but it's in place until I find a better way...
-            // This will probably involve mixins, I need to figure this out
-            Timer.schedule(this::uploadInBackground, 0.25F);
+        Events.on(EventType.StateChangeEvent.class, e -> {
+            if (e.to != GameState.State.menu) {
+                dirty = true;
+            } else if (e.from != GameState.State.menu) {
+                // Leaving a game: give the game some time to finish saving
+                Timer.schedule(this::uploadInBackground, 0.25F);
+            }
         });
         Events.on(EventType.DisposeEvent.class, e -> {
-            // The game is closing: upload synchronously, there is no UI left to show errors
-            try {
-                em.exportToDrive();
-            } catch (IOException exc) {
-                Log.err("MAS: unable to upload the save to Google Drive", exc);
+            // The game is closing: finish the running upload, then upload the last changes if needed.
+            // There is no UI left to show errors.
+            waitForUpload();
+            if (dirty && em.isExportEnabled()) {
+                try {
+                    byte[] zip = em.exportData();
+                    em.drive.upload(zip, em.getLastSynced());
+                } catch (IOException exc) {
+                    Log.err("MAS: unable to upload the save to Google Drive", exc);
+                }
             }
         });
         Events.on(EventType.ClientLoadEvent.class, e -> {
+            popup = new SyncPopup();
             if (message != null) {
                 ui.showInfo(message.get());
             }
+            downloadInBackground();
+            if (Core.settings.getBool("mas-auto-update")) updateInBackground();
         });
     }
 
-    /** Uploads the save without freezing the game. Skipped if an upload is already running. */
+    /** Uploads the save without freezing the game, with a popup showing the progress. */
     private void uploadInBackground() {
-        if (!em.isExportEnabled() || !uploading.compareAndSet(false, true)) return;
+        if (!dirty || !em.isExportEnabled() || uploadThread != null) return;
         byte[] zip;
         try {
             // Zipping reads the save files, so it stays on the main thread
             zip = em.exportData();
         } catch (IOException exc) {
-            uploading.set(false);
             Log.err(exc);
             ui.showException(exc);
             return;
         }
         long lastSynced = em.getLastSynced();
-        Threads.daemon("MAS upload", () -> {
+        dirty = false;
+        popup.show("mas-uploading", "mas-do-not-close");
+        uploadThread = Threads.daemon("MAS upload", () -> {
+            IOException error = null;
             try {
                 em.drive.upload(zip, lastSynced);
-                uploadWarningShown = false;
                 Log.info("MAS: save uploaded to Google Drive (@ bytes).", zip.length);
             } catch (IOException exc) {
                 Log.err("MAS: unable to upload the save to Google Drive", exc);
-                if (!uploadWarningShown) {
-                    uploadWarningShown = true;
-                    String text = describe(exc) + "\n" + Core.bundle.get("mas-offline-export");
-                    Core.app.post(() -> ui.showInfo(text));
+                error = exc;
+                dirty = true;
+            }
+            IOException finalError = error;
+            Core.app.post(() -> {
+                uploadThread = null;
+                if (finalError == null) {
+                    popup.finish("mas-upload-done", true);
+                } else {
+                    popup.finish("mas-upload-failed", false);
+                    ui.showInfo(describe(finalError) + "\n" + Core.bundle.get("mas-offline-export"));
                 }
-            } finally {
-                uploading.set(false);
+            });
+        });
+    }
+
+    private void waitForUpload() {
+        Thread thread = uploadThread;
+        if (thread == null) return;
+        Log.info("MAS: waiting for the upload to finish before closing.");
+        try {
+            thread.join(MAX_UPLOAD_WAIT);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    /** Checks Google Drive for a newer save, with a popup showing the progress. */
+    private void downloadInBackground() {
+        if (!em.isImportEnabled() || em.hasPendingImport()) return;
+        popup.show("mas-downloading", null);
+        Threads.daemon("MAS download", () -> {
+            try {
+                boolean downloaded = em.downloadFromDrive();
+                Core.app.post(() -> {
+                    if (downloaded) {
+                        popup.hide();
+                        ui.showCustomConfirm("@mas-restart-title", "@mas-restart-text", "@mas-restart-quit", "@mas-restart-later",
+                                () -> Core.app.exit(), () -> {});
+                    } else {
+                        popup.finish("mas-download-up-to-date", true);
+                    }
+                });
+            } catch (IOException exc) {
+                Log.err("MAS: unable to download the save from Google Drive", exc);
+                Core.app.post(() -> {
+                    popup.finish("mas-download-failed", false);
+                    ui.showInfo(describe(exc) + "\n" + Core.bundle.get("mas-offline-import"));
+                });
+            }
+        });
+    }
+
+    private void updateInBackground() {
+        Threads.daemon("MAS update", () -> {
+            try {
+                String version = Updater.update();
+                if (version != null) {
+                    Core.app.post(() -> ui.showInfo(Core.bundle.format("mas-updated", version)));
+                }
+            } catch (IOException | RuntimeException exc) {
+                Log.err("MAS: unable to update the mod", exc);
             }
         });
     }
@@ -130,6 +197,7 @@ public class MindustryAutomaticSync extends Mod {
         table.textPref("mas-secret", "");
         table.checkPref("mas-enable-export", false);
         table.checkPref("mas-enable-import", false);
+        table.checkPref("mas-auto-update", true);
         table.button("@mas-test-connection", this::testConnection).growX().padTop(3f).row();
         table.button(
                 Core.bundle.get("settings.reset", "Reset to Defaults"),
@@ -139,6 +207,7 @@ public class MindustryAutomaticSync extends Mod {
                     Core.settings.remove("mas-secret");
                     Core.settings.remove("mas-enable-export");
                     Core.settings.remove("mas-enable-import");
+                    Core.settings.remove("mas-auto-update");
                     buildSettings(table);
                 }
         ).growX().row();
